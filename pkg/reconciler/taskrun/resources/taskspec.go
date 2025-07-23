@@ -105,8 +105,8 @@ func GetTaskData(ctx context.Context, taskRun *v1.TaskRun, getTask GetTask) (*re
 func GetStepActionsData(ctx context.Context, taskSpec v1.TaskSpec, taskRun *v1.TaskRun, tekton clientset.Interface, k8s kubernetes.Interface, requester remoteresource.Requester) ([]v1.Step, error) {
 	steps := []v1.Step{}
 	for i, step := range taskSpec.Steps {
-		s := step.DeepCopy()
 		if step.Ref != nil {
+			s := step.DeepCopy()
 			getStepAction := GetStepActionFunc(tekton, k8s, requester, taskRun, taskSpec, s)
 			stepAction, source, err := getStepAction(ctx, s.Ref.Name)
 			if err != nil {
