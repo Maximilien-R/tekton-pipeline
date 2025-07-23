@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	v1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
@@ -28,6 +29,7 @@ import (
 	"github.com/tektoncd/pipeline/pkg/pod"
 	remoteresource "github.com/tektoncd/pipeline/pkg/remoteresolution/resource"
 	"github.com/tektoncd/pipeline/pkg/trustedresources"
+	"golang.org/x/sync/errgroup"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -103,25 +105,40 @@ func GetTaskData(ctx context.Context, taskRun *v1.TaskRun, getTask GetTask) (*re
 
 // GetStepActionsData extracts the StepActions and merges them with the inlined Step specification.
 func GetStepActionsData(ctx context.Context, taskSpec v1.TaskSpec, taskRun *v1.TaskRun, tekton clientset.Interface, k8s kubernetes.Interface, requester remoteresource.Requester) ([]v1.Step, error) {
-	steps := []v1.Step{}
+	var taskRunStatusMutex sync.Mutex
+
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(5)
+
+	steps := make([]v1.Step, len(taskSpec.Steps))
 	for i, step := range taskSpec.Steps {
-		if step.Ref != nil {
+		if step.Ref == nil {
+			steps[i] = step
+			continue
+		}
+
+		// Capture loop variables for goroutine
+		i, step := i, step
+
+		g.Go(func() error {
 			s := step.DeepCopy()
+
 			getStepAction := GetStepActionFunc(tekton, k8s, requester, taskRun, taskSpec, s)
 			stepAction, source, err := getStepAction(ctx, s.Ref.Name)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			// update stepstate with remote origin information
 			if source != nil {
+				taskRunStatusMutex.Lock()
 				found := false
-				for i, st := range taskRun.Status.Steps {
+				for j, st := range taskRun.Status.Steps {
 					if st.Name == s.Name {
 						found = true
 						if st.Provenance != nil {
-							taskRun.Status.Steps[i].Provenance.RefSource = source
+							taskRun.Status.Steps[j].Provenance.RefSource = source
 						} else {
-							taskRun.Status.Steps[i].Provenance = &v1.Provenance{RefSource: source}
+							taskRun.Status.Steps[j].Provenance = &v1.Provenance{RefSource: source}
 						}
 						break
 					}
@@ -137,18 +154,19 @@ func GetStepActionsData(ctx context.Context, taskSpec v1.TaskSpec, taskRun *v1.T
 						taskRun.Status.Steps = append(taskRun.Status.Steps, stp)
 					}
 				}
+				taskRunStatusMutex.Unlock()
 			}
 			stepActionSpec := stepAction.StepActionSpec()
 			stepActionSpec.SetDefaults(ctx)
 
 			stepFromStepAction := stepActionSpec.ToStep()
 			if err := validateStepHasStepActionParameters(s.Params, stepActionSpec.Params); err != nil {
-				return nil, err
+				return err
 			}
 
 			stepFromStepAction, err = applyStepActionParameters(stepFromStepAction, &taskSpec, taskRun, s.Params, stepActionSpec.Params)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			s.Image = stepFromStepAction.Image
@@ -174,10 +192,13 @@ func GetStepActionsData(ctx context.Context, taskSpec v1.TaskSpec, taskRun *v1.T
 			}
 			s.Params = nil
 			s.Ref = nil
-			steps = append(steps, *s)
-		} else {
-			steps = append(steps, step)
-		}
+			steps[i] = *s
+			return nil
+		})
 	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
 	return steps, nil
 }
