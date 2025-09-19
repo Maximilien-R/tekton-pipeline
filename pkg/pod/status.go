@@ -269,7 +269,8 @@ func setTaskRunStatusBasedOnStepStatus(ctx context.Context, logger *zap.SugaredL
 	}
 
 	// Continue with extraction of termination messages
-	for _, s := range stepStatuses {
+	orderedStepStates := make([]v1.StepState, len(stepStatuses))
+	for i, s := range stepStatuses {
 		// Avoid changing the original value by modifying the pointer value.
 		state := s.State.DeepCopy()
 		taskRunStepResults := []v1.TaskRunStepResult{}
@@ -378,18 +379,16 @@ func setTaskRunStatusBasedOnStepStatus(ctx context.Context, logger *zap.SugaredL
 			Inputs:            sas.Inputs,
 			Outputs:           sas.Outputs,
 		}
-		foundStep := false
-		for i, ss := range trs.Steps {
+		for _, ss := range trs.Steps {
 			if ss.Name == stepState.Name {
 				stepState.Provenance = ss.Provenance
-				trs.Steps[i] = stepState
-				foundStep = true
 				break
 			}
 		}
-		if !foundStep {
-			trs.Steps = append(trs.Steps, stepState)
-		}
+		orderedStepStates[i] = stepState
+	}
+	if len(orderedStepStates) > 0 {
+		trs.Steps = orderedStepStates
 	}
 
 	return errors.Join(errs...)
